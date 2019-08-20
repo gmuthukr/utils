@@ -1,0 +1,181 @@
+# Systemtap script to trace latency of concurrent memcached requests
+# as they percolate through the Linux kernel.
+# - Jacob Leverich <leverich@cs.stanford.edu> 2013
+#
+# Note: You MUST call this script with "-x <TID>" where TID is the
+# *task id* of a memcached worker thread. This is usually PID+1 of
+# memcached. So do something like:
+#
+#    % memcached -t 1 -d
+#    % pgrep memcached
+#    31336
+#    % sudo stap -v -x 31337 track.stp
+# or
+#    % sudo stap -v -x $[`pgrep memcached | head -1`+1] track.stp
+
+# This script builds the following maps:
+# (1) Lookup socket by file descriptor
+#   fd -> sk
+#
+# (2) Record timestamps by socket
+#   sk -> rx_time (netif_receive_skb().call to ip_rcv().call)
+#   sk -> tcpip_time (ip_rcv().call to tcp_rcv_established().return)
+#   sk -> epoll_wait() (tcp_rcv_established().return to epoll_wait.return)
+#   sk -> queuing delay (epoll_wait.return to read)
+#   sk -> read() time (read to read.return)
+#   sk -> memcached time (read.return to sendmsg)
+#   sk -> tcpip time (sendmsg to ip_output)
+#   sk -> tx_time (ip_output dev_hard_start_xmit)
+
+global fd_to_sk  # map fd -> socket
+global sk%[1024] # sk[$sk, {rx_time, tcpip_time, ...}]
+
+global last_fd         # latest fd seen by sendmsg() syscall
+global start_timestamp # timestamp for last packet in __netif_receive_skb()
+global rx_timestamp    # timestamp for last packet in ip_rcv()
+global epoll_timestamp # timestamp of last epoll_wait() that had events
+
+global stats
+
+probe kernel.function("__netif_receive_skb@net/core/dev.c").call {
+    start_timestamp = gettimeofday_ns()
+}
+
+probe kernel.function("ip_rcv@net/ipv4/ip_input.c").call {
+    rx_timestamp = gettimeofday_ns()
+}
+
+# We assume that netif_receive and ip_rcv is immediately followed by
+# tcp_rcv_established, so we use their global timestamps for this
+# packet.
+probe kernel.function("tcp_rcv_established@net/ipv4/tcp_input.c").return {
+    s = $sk
+    sk[s,"start"]    = start_timestamp
+    sk[s,"rx"]       = rx_timestamp
+    sk[s,"tcpip_rx"] = gettimeofday_ns()
+}
+
+probe syscall.epoll_wait.return {
+    if (tid() != target()) next
+
+    # Number of events return by epoll (which may be 0) times 1000 (so
+    # we can see if the average is less than 1 without floating point
+    # arithmetic).
+    stats["epoll_return"] <<< $return * 1000
+
+    epoll_timestamp = gettimeofday_ns()
+    # FIXME: Figure out how to iterate events[] so we know for sure we
+    # mark the right fds. Right now, we assume epoll_wait returns all
+    # previously received packets, which is a save assumption since
+    # libevent calls epoll_wait with a huge max_events parameter.
+    #
+    #    for (i = 0; i < $return; i++) {
+    #        printf("        event = 0x%08x\n", $events[i]->data)
+    #        printf("        fd = %d\n", $events[i]->data)
+    #    }
+}
+
+probe syscall.read {
+    if (tid() != target()) next
+    if (!fd_to_sk[$fd]) next
+    s = fd_to_sk[$fd]
+
+    sk[s,"epoll"] = epoll_timestamp
+    sk[s,"wait"] = gettimeofday_ns()
+}
+
+probe syscall.read.return {
+    if (tid() != target()) next;
+    if (!fd_to_sk[$fd]) next
+    s = fd_to_sk[$fd]
+
+    sk[s,"read"] = gettimeofday_ns()
+}
+
+probe syscall.sendmsg {
+    if (tid() != target()) next;
+
+    last_fd = $fd
+
+    if (!fd_to_sk[last_fd]) next
+    s = fd_to_sk[last_fd]
+
+    sk[s,"memcached"] = gettimeofday_ns()
+}
+
+probe kernel.function("__sys_sendmsg@net/socket.c").call {
+    if (tid() != target()) next;
+    fd_to_sk[last_fd] = $sock->sk
+}
+
+probe kernel.function("dev_hard_start_xmit@net/core/dev.c").call {
+    if (tid() != target()) next;
+
+    now = gettimeofday_ns()
+
+    # FIXME: dev_hard_start_xmit may transmit multiple skbuffs. Do we
+    # need to iterate and process each one?
+    #
+    #    for (i = $skb; i != 0; i = @cast(i, "struct sk_buff")->next) {
+    #        s = @cast(i, "struct sk_buff")->sk
+    #        ...
+    #    }
+
+    s = $skb->sk
+
+    _tx = now
+    _start = sk[s,"start"]
+    time = _tx - _start
+
+    if (time > 100000 || time < 0) next
+
+    _rx        = sk[s,"rx"]
+    _tcpip_rx  = sk[s,"tcpip_rx"]
+    _epoll     = sk[s,"epoll"]
+    _wait      = sk[s,"wait"]
+    _read      = sk[s,"read"]
+    _memcached = sk[s,"memcached"]
+
+    rx        = _rx        - _start
+    tcpip_rx  = _tcpip_rx  - _rx
+    epoll     = _epoll     - _tcpip_rx
+    wait      = _wait      - _epoll
+    read      = _read      - _wait
+    memcached = _memcached - _read
+    tx        = _tx        - _memcached
+
+    if (rx < 0 ||
+        tcpip_rx < 0 ||
+        epoll < 0 ||
+        wait < 0 ||
+        read < 0 ||
+        memcached < 0 ||
+        tx < 0) next
+
+    stats["rx"] <<< rx
+    stats["tcpip_rx"] <<< tcpip_rx
+    stats["epoll"] <<< epoll
+    stats["wait"] <<< wait
+    stats["read"] <<< read
+    stats["memcached"] <<< memcached
+    stats["tx"] <<< tx
+    stats["total"] <<< time
+}
+
+probe timer.s(1) {
+#    printf("HELLO WORLD\n");
+    if (@count(stats["total"]) < 1) next
+
+    printf("rx=%d tcpip_rx=%d epoll=%d wait=%d read=%d memcached=%d tx=%d total=%d epoll_return=%d count=%d\n",
+           @avg(stats["rx"]),
+           @avg(stats["tcpip_rx"]),
+           @avg(stats["epoll"]),
+           @avg(stats["wait"]),
+           @avg(stats["read"]),
+           @avg(stats["memcached"]),
+           @avg(stats["tx"]),
+           @avg(stats["total"]),
+           @avg(stats["epoll_return"]),
+           @count(stats["total"])
+        )
+}

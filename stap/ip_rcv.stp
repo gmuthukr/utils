@@ -1,0 +1,6 @@
+stap -vL 'kernel.statement("ip_rcv@*:*")'
+  returns all lines with local variables
+  then probe at target line
+
+stap -ve 'probe kernel.statement("ip_rcv@net/ipv4/ip_input.c:421") {printf("%x\n", $skb);exit();}'
+

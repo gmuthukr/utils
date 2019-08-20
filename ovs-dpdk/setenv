@@ -1,0 +1,9 @@
+#!/bin/bash
+export DPDK_DIR=/home/gowri/ovs/build/DPDK
+export DPDK_BUILD=$DPDK_DIR/ppc_64-power8-linuxapp-gcc
+export DB_SOCK=/usr/local/var/run/openvswitch/db.sock
+export RTE_SDK=$DPDK_DIR
+export RTE_TARGET=ppc_64-power8-linuxapp-gcc
+export RTE_SDK_BIN=$RTE_SDK/$RTE_TARGET
+export EXTRA_CFLAGS='-O0 -g'
+
