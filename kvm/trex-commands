@@ -1,0 +1,11 @@
+trex-server:
+/opt/trex/current/t-rex-64 -i -c 6 --checksum-offload --cfg /var/lib/pbench-agent/tmp/trex_cfg.yaml --iom 0 -v 4 --vlan
+
+pbench:
+./pbench-trafficgen --skip-git-pull --skip-trex-server --config=direct-srcip_flows --samples=1 --frame-sizes="64" --num-flows=1024 --traffic-directions=bidirectional --flow-mods=src-ip --traffic-generator=trex-txrx --devices="0000:19:00.0,0000:19:00.1" --sniff-runtime=60 --search-runtime=180 --validation-runtime=60 --max-loss-pct=0.0000000001 --src-macs="24:6e:96:c4:0e:88,24:6e:96:c4:0e:8a" --dst-macs="52:54:00:71:a0:01,52:54:00:71:a0:02" --vlan-ids 801,801 --run-dir=/opt/runbench/ --rate=4.0 --rate-unit=mpps 2>&1 | tee log
+
+trafficgen:
+export RATE=<RATE>;python -u ./trex-txrx.py --device-pairs=0:1 --active-device-pairs=0:1 --mirrored-log --measure-latency=0  --rate=$RATE --rate-unit=mpps --size=64 --runtime=180 --runtime-tolerance=5 --run-bidirec=1 --run-revunidirec=0 --num-flows=1024 --src-macs=24:6e:96:c4:0e:88,24:6e:96:c4:0e:8a --dst-macs=52:54:00:71:a0:01,52:54:00:71:a0:02 --vlan-ids-list 801,801 --use-src-ip-flows=1 --use-dst-ip-flows=0 --use-src-mac-flows=0 --use-dst-mac-flows=0 --use-src-port-flows=0 --use-dst-port-flows=0 --use-protocol-flows=0 --packet-protocol=UDP --stream-mode=continuous --max-loss-pct=0.0001 --skip-hw-flow-stats --teaching-measurement-interval=10.0 --teaching-warmup-packet-rate=1000 --teaching-measurement-packet-rate=1000
+
+automation:
+rebal.py
