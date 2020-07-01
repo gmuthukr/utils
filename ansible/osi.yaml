@@ -1,0 +1,15 @@
+- hosts: overcloud-computeovsdpdksriov-0
+  name: osi
+  tasks:
+    - name: osi_query
+      os_server_info:
+        cloud: 'overcloud'
+        server: 'iperf_server'
+        validate_certs: False
+      register: result
+      delegate_to: undercloud-0
+      failed_when: result.openstack_servers == []
+    - set_fact:
+        openstack_servers: "{{ result.openstack_servers }}"
+    - debug:
+        msg: "{{ openstack_servers }}"
